@@ -1,0 +1,17 @@
+<html>
+    <head>
+    </head>
+    <body>
+        <button id="hello-button">Hello!</button>
+    </body>
+    <script type="text/javascript" src="/static/js/jquery.min.js"></script>
+    <script>
+         $(document).ready(function() {
+             $('#hello-button').click(function() {
+                 $.post("/unhashs2", {hashs2: '0f022022'}, function(data) {
+                    alert(data);
+                 });
+             })
+         })
+    </script>
+</html>
