@@ -1,10 +1,12 @@
 from flask import Flask
 import flask
 import parser
+import json
 
 LIBPATH = "/Users/syzhou/10gen/support/visualgeo/s2/mongo-s2/build/libs2parser.dylib"
 
 app = Flask(__name__)
+
 s2parser = parser.S2Parser(LIBPATH)
 
 
@@ -23,6 +25,16 @@ def unhashs2():
     geojson = s2parser.parse_to_json(geohash);
     print geojson
     return flask.jsonify(**geojson)
+
+@app.route('/parse_cells', methods=['POST'])
+def parse_cells():
+    cells = json.loads(flask.request.form["cells"])
+    print "parsing cells: ", cells
+    polygons = []
+    for cell in cells:
+        geojson = s2parser.parse_to_json(cell);
+        polygons.append(geojson)
+    return flask.jsonify(polygons=polygons)
 
 if __name__ == '__main__':
     app.debug = True

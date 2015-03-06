@@ -29,6 +29,8 @@
         background-position: center;
       }
     </style>
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.2/css/bootstrap.min.css">
+    <script type="text/javascript" src="/static/js/jquery.min.js"></script>
     <script src="https://maps.googleapis.com/maps/api/js?v=3.exp"></script>
     <script type="text/javascript">
 /* Map functions */
@@ -45,7 +47,7 @@ function initMap() {
 
 function loadGeoJsonString(geoString) {
   var geojson = JSON.parse(geoString);
-  loadGeoJson(geojson);
+  return loadGeoJson(geojson);
 }
 
 function loadGeoJson(geometry) {
@@ -54,8 +56,9 @@ function loadGeoJson(geometry) {
     id: 0,
     geometry: geometry,
   }
-  map.data.addGeoJson(feature);
+  var res = map.data.addGeoJson(feature);
   zoom(map);
+  return res
 }
 
 /**
@@ -156,15 +159,119 @@ function handleDrop(e) {
   return false;
 }
 
+// { type: "Annulus", center: [lng, lat], min: 0, max: 10 /* meters */ }
+
+function ShapeAndCovering(id) {
+  // query GeoJSON or Annnulas
+  this.shape = null;
+  // Array of GeoJSON, each polygon represents a cell
+  this.covering = [];
+  this.id = id;
+  // Features to diplay
+}
+
+function get2dSphereField(stage) {
+  if (stage.stage != "IXSCAN") return null;
+  keyPattern = stage.keyPattern;
+  if (keyPattern == null) return null;
+  var res = null;
+  Object.getOwnPropertyNames(keyPattern).forEach(function(field) {
+    if (keyPattern[field] == "2dsphere") {
+      res = field;
+    }})
+
+  return res;
+}
+
+function findField(node, expectedField) {
+  res = null;
+  if (node === null || typeof node !== 'object') {
+    return null;
+  }
+
+  nodeKeys = Object.getOwnPropertyNames(node);
+  for (i = 0; i < nodeKeys.length; i++) {
+    field = nodeKeys[i];
+    if (field == expectedField) {
+      return node[field];
+    } else {
+      res = findField(node[field], expectedField);
+    }
+  }
+  return res;
+}
+
+// bounds is the array of string
+// [
+//   "[\"0f1332332\", \"0f1332332\"]",
+//   "[\"0f13323323\", \"0f13323323\"]",
+// ]
+function translateIndexBoundsToGeoJSON(bounds, processCovering) {
+  // Only show intervals, no points
+  var startRe = /\"(\w*)\".*\)$/;
+  var cells = [];
+  bounds.forEach(function(bound) {
+    var m = startRe.exec(bound);
+    if (m) cells.push(m[1]);
+  });
+  // cells ["0f1332332", "0f13323323"]
+  $.post("/parse_cells", {cells: JSON.stringify(cells)}, function(data) {
+    // console.log(data);
+    processCovering(data.polygons);
+  });
+}
+
+function showGeoQueryExplain(shapeAndCovering) {
+  loadGeoJson(shapeAndCovering.shape);
+  shapeAndCovering.covering.forEach(function(polygon) {
+    loadGeoJson(polygon);
+  });
+}
+
+function parseGeoQueryExplain(explain_text) {
+  var explain = JSON.parse(explain_text);
+  var stage = explain.executionStats.executionStages;
+  // TODO: inputStage / executionStats maybe an array.
+  while (stage != null && get2dSphereField(stage) == null) {
+    stage = stage.inputStage;
+  }
+
+  if (stage == null) {
+    console.log("cannot find IXSCAN stage in parseGeoQueryExplain");
+    return;
+  }
+
+  var geoField = get2dSphereField(stage);
+  // Convert stage.indexBounds
+  translateIndexBoundsToGeoJSON(stage.indexBounds[geoField], function(covering) {
+    shapeAndCovering = new ShapeAndCovering(0);
+    shapeAndCovering.covering = covering;
+    shapeAndCovering.shape = findField(explain.queryPlanner.parsedQuery, "$geometry");
+    showGeoQueryExplain(shapeAndCovering);
+  });
+}
 
 google.maps.event.addDomListener(window, 'load', function() {
   initMap();
   initEvents();
 });
 
+$(document).ready(function() {
+   $('#show_button').click(function() {
+      parseGeoQueryExplain($('#explain_text').val());
+   })
+});
+
     </script>
   </head>
   <body>
+    <div>
+      <textarea class="form-control" id="explain_text" cols="30" rows="10">
+{"queryPlanner":{"plannerVersion":1,"namespace":"test.geogeo","indexFilterSet":false,"parsedQuery":{"loc":{"$geoWithin":{"$geometry":{"type":"Polygon","coordinates":[[[-73.98784,40.75747],[-73.93784,40.65747],[-74.01784,40.63747],[-73.98784,40.75747]]]}}}},"winningPlan":{"stage":"KEEP_MUTATIONS","inputStage":{"stage":"FETCH","filter":{"loc":{"$geoWithin":{"$geometry":{"type":"Polygon","coordinates":[[[-73.98784,40.75747],[-73.93784,40.65747],[-74.01784,40.63747],[-73.98784,40.75747]]]}}}},"inputStage":{"stage":"IXSCAN","keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320102\", \"4f10320102\"]","[\"4f103201020\", \"4f103201020\"]","[\"4f1032010202\", \"4f1032010202\"]","[\"4f10320102022\", \"4f10320102023\")","[\"4f103201023\", \"4f103201023\"]","[\"4f1032010230\", \"4f1032010230\"]","[\"4f10320102300\", \"4f10320102301\")","[\"4f10320102302\", \"4f10320102303\")","[\"4f10320102303\", \"4f10320102304\")","[\"4f1032010231\", \"4f1032010232\")"]}}}},"rejectedPlans":[]},"executionStats":{"executionSuccess":true,"nReturned":0,"executionTimeMillis":6,"totalKeysExamined":0,"totalDocsExamined":0,"executionStages":{"stage":"KEEP_MUTATIONS","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"inputStage":{"stage":"FETCH","filter":{"loc":{"$geoWithin":{"$geometry":{"type":"Polygon","coordinates":[[[-73.98784,40.75747],[-73.93784,40.65747],[-74.01784,40.63747],[-73.98784,40.75747]]]}}}},"nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320102\", \"4f10320102\"]","[\"4f103201020\", \"4f103201020\"]","[\"4f1032010202\", \"4f1032010202\"]","[\"4f10320102022\", \"4f10320102023\")","[\"4f103201023\", \"4f103201023\"]","[\"4f1032010230\", \"4f1032010230\"]","[\"4f10320102300\", \"4f10320102301\")","[\"4f10320102302\", \"4f10320102303\")","[\"4f10320102303\", \"4f10320102304\")","[\"4f1032010231\", \"4f1032010232\")"]},"keysExamined":0,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}}},"allPlansExecution":[]},"serverInfo":{"host":"siyuan-mbp","port":27017,"version":"3.1.0-pre-","gitVersion":"ed108dccf043a13e1eed08dafc6c9eb793094b34"},"ok":1}
+</textarea>
+      <button id="show_button" type="submit" class="btn btn-primary">Show<span class="glyphicon glyphicon-map-marker"/></button>
+    </div>
+
     <div id="map-canvas"></div>
     <div id="drop-container"><div id="drop-silhouette"></div></div>
   </body>
