@@ -36,6 +36,7 @@
 /* Map functions */
 
 var map;
+var nearExplain;
 
 function initMap() {
   // set up the map
@@ -221,15 +222,22 @@ function translateIndexBoundsToGeoJSON(bounds, processCovering) {
   });
 }
 
+function clearMap() {
+  map.data.forEach(function(feature) {
+    map.data.remove(feature)
+  })
+}
+
 function showGeoQueryExplain(shapeAndCovering) {
+  clearMap();
   loadGeoJson(shapeAndCovering.shape);
   shapeAndCovering.covering.forEach(function(polygon) {
     loadGeoJson(polygon);
   });
+  // TODO: Add style.
 }
 
-function parseGeoQueryExplain(explain_text) {
-  var explain = JSON.parse(explain_text);
+function parseGeoQueryExplain(explain) {
   var stage = explain.executionStats.executionStages;
   // TODO: inputStage / executionStats maybe an array.
   while (stage != null && get2dSphereField(stage) == null) {
@@ -251,6 +259,84 @@ function parseGeoQueryExplain(explain_text) {
   });
 }
 
+
+// ----------- Geo Near -----------
+// { type: "Annulus", center: [lng, lat], min: 0, max: 10 /* meters */ }
+function Annulus(center, min, max) {
+  this.type = "Annulus";
+  this.center = center;
+  this.min = min;
+  this.max = max;
+
+}
+
+function NearExplain() {
+  this.stages = [];
+  this.rootStage = null;
+  this.curStage = 0;
+}
+
+function showGeoNearExplain() {
+  clearMap();
+  nearExplain.stages[nearExplain.curStage].coverings.forEach(function(polygon) {
+    loadGeoJson(polygon);
+  });
+}
+
+function parseGeoNearExplain(explain) {
+  nearExplain = new NearExplain();
+  rootStage = explain.executionStats.executionStages;
+  nearExplain.rootStage = rootStage;
+  if (rootStage.stage != "GEO_NEAR_2DSPHERE") return null;
+
+  // Get center
+  var nearQueryPred = findField(explain.queryPlanner.parsedQuery, "$near");
+  if (nearQueryPred == null) {
+    nearQueryPred = findField(explain.queryPlanner.parsedQuery, "$nearSphere");
+  }
+  var center = nearQueryPred["$geometry"].coordinates;
+
+  // Search annulus
+  rootStage.searchIntervals.forEach(function(interval, idx) {
+    annulus = new Annulus(center, interval.minDistance, interval.maxDistance);
+    shapeAndCovering = new ShapeAndCovering(idx);
+    shapeAndCovering.shape = annulus;
+    nearExplain.stages.push(shapeAndCovering);
+  });
+
+  var curStage = 0;
+  // TODO: find field name
+  var fieldName = Object.getOwnPropertyNames(rootStage.inputStages[0].inputStage.indexBounds)[0];
+
+  function processNearCovering(polygons) {
+    nearExplain.stages[curStage].coverings = polygons;
+
+    curStage++;
+    if (curStage < rootStage.inputStages.length) {
+      translateIndexBoundsToGeoJSON(
+        rootStage.inputStages[curStage].inputStage.indexBounds[fieldName],
+        processNearCovering
+      );
+    } else {
+      showGeoNearExplain();
+    }
+  };
+
+  translateIndexBoundsToGeoJSON(
+    rootStage.inputStages[curStage].inputStage.indexBounds[fieldName],
+    processNearCovering
+  );
+
+  return nearExplain;
+}
+
+function parseExplain(explain) {
+  if (parseGeoNearExplain(explain)) return;
+  parseGeoQueryExplain(explain);
+}
+
+// ----------- Geo Near -----------
+
 google.maps.event.addDomListener(window, 'load', function() {
   initMap();
   initEvents();
@@ -258,8 +344,29 @@ google.maps.event.addDomListener(window, 'load', function() {
 
 $(document).ready(function() {
    $('#show_button').click(function() {
-      parseGeoQueryExplain($('#explain_text').val());
-   })
+      parseExplain(JSON.parse($('#explain_text').val()));
+   });
+
+   $('#prev_button').click(function() {
+      if (nearExplain == null) {
+        console.log("nearExplain is null");
+        return;
+      }
+
+      if (nearExplain.curStage > 0) nearExplain.curStage--;
+      showGeoNearExplain();
+   });
+
+
+   $('#next_button').click(function() {
+      if (nearExplain == null) {
+        console.log("nearExplain is null");
+        return;
+      }
+
+      if (nearExplain.curStage < nearExplain.stages.length - 1) nearExplain.curStage++;
+      showGeoNearExplain();
+   });
 });
 
     </script>
@@ -267,9 +374,10 @@ $(document).ready(function() {
   <body>
     <div>
       <textarea class="form-control" id="explain_text" cols="30" rows="10">
-{"queryPlanner":{"plannerVersion":1,"namespace":"test.geogeo","indexFilterSet":false,"parsedQuery":{"loc":{"$geoWithin":{"$geometry":{"type":"Polygon","coordinates":[[[-73.98784,40.75747],[-73.93784,40.65747],[-74.01784,40.63747],[-73.98784,40.75747]]]}}}},"winningPlan":{"stage":"KEEP_MUTATIONS","inputStage":{"stage":"FETCH","filter":{"loc":{"$geoWithin":{"$geometry":{"type":"Polygon","coordinates":[[[-73.98784,40.75747],[-73.93784,40.65747],[-74.01784,40.63747],[-73.98784,40.75747]]]}}}},"inputStage":{"stage":"IXSCAN","keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320102\", \"4f10320102\"]","[\"4f103201020\", \"4f103201020\"]","[\"4f1032010202\", \"4f1032010202\"]","[\"4f10320102022\", \"4f10320102023\")","[\"4f103201023\", \"4f103201023\"]","[\"4f1032010230\", \"4f1032010230\"]","[\"4f10320102300\", \"4f10320102301\")","[\"4f10320102302\", \"4f10320102303\")","[\"4f10320102303\", \"4f10320102304\")","[\"4f1032010231\", \"4f1032010232\")"]}}}},"rejectedPlans":[]},"executionStats":{"executionSuccess":true,"nReturned":0,"executionTimeMillis":6,"totalKeysExamined":0,"totalDocsExamined":0,"executionStages":{"stage":"KEEP_MUTATIONS","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"inputStage":{"stage":"FETCH","filter":{"loc":{"$geoWithin":{"$geometry":{"type":"Polygon","coordinates":[[[-73.98784,40.75747],[-73.93784,40.65747],[-74.01784,40.63747],[-73.98784,40.75747]]]}}}},"nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320102\", \"4f10320102\"]","[\"4f103201020\", \"4f103201020\"]","[\"4f1032010202\", \"4f1032010202\"]","[\"4f10320102022\", \"4f10320102023\")","[\"4f103201023\", \"4f103201023\"]","[\"4f1032010230\", \"4f1032010230\"]","[\"4f10320102300\", \"4f10320102301\")","[\"4f10320102302\", \"4f10320102303\")","[\"4f10320102303\", \"4f10320102304\")","[\"4f1032010231\", \"4f1032010232\")"]},"keysExamined":0,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}}},"allPlansExecution":[]},"serverInfo":{"host":"siyuan-mbp","port":27017,"version":"3.1.0-pre-","gitVersion":"ed108dccf043a13e1eed08dafc6c9eb793094b34"},"ok":1}
-</textarea>
+{"queryPlanner":{"plannerVersion":1,"namespace":"test.geo","indexFilterSet":false,"parsedQuery":{"loc":{"$near":{"$geometry":{"type":"Point","coordinates":[0,0]},"$maxDistance":1000000}}},"winningPlan":{"stage":"GEO_NEAR_2DSPHERE","keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","inputStages":[{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"0f022022\", \"0f022023\")","[\"0f0221\", \"0f0222\")","[\"0f0222\", \"0f0223\")","[\"0f0223\", \"0f0224\")","[\"0f1330\", \"0f1331\")","[\"0f133133\", \"0f133134\")","[\"0f1332\", \"0f1333\")","[\"0f1333\", \"0f1334\")","[\"0f2000\", \"0f2001\")","[\"0f2001\", \"0f2002\")","[\"0f200200\", \"0f200201\")","[\"0f2003\", \"0f2004\")","[\"0f3110\", \"0f3111\")","[\"0f3111\", \"0f3112\")","[\"0f3112\", \"0f3113\")","[\"0f311311\", \"0f311312\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"0f02202\", \"0f02203\")","[\"0f0221\", \"0f0222\")","[\"0f0223\", \"0f0224\")","[\"0f1330\", \"0f1331\")","[\"0f13313\", \"0f13314\")","[\"0f1332\", \"0f1333\")","[\"0f2001\", \"0f2002\")","[\"0f20020\", \"0f20021\")","[\"0f2003\", \"0f2004\")","[\"0f3110\", \"0f3111\")","[\"0f3112\", \"0f3113\")","[\"0f31131\", \"0f31132\")"]}}}]},"rejectedPlans":[]},"executionStats":{"executionSuccess":true,"nReturned":1,"executionTimeMillis":5,"totalKeysExamined":2,"totalDocsExamined":1,"executionStages":{"stage":"GEO_NEAR_2DSPHERE","nReturned":1,"executionTimeMillisEstimate":0,"works":16,"advanced":1,"needTime":14,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","searchIntervals":[{"minDistance":0,"maxDistance":872532.2996086146,"maxInclusive":false},{"minDistance":872532.2996086146,"maxDistance":1000000,"maxInclusive":true}],"inputStages":[{"stage":"FETCH","nReturned":1,"executionTimeMillisEstimate":0,"works":2,"advanced":1,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":1,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":1,"executionTimeMillisEstimate":0,"works":1,"advanced":1,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"0f022022\", \"0f022023\")","[\"0f0221\", \"0f0222\")","[\"0f0222\", \"0f0223\")","[\"0f0223\", \"0f0224\")","[\"0f1330\", \"0f1331\")","[\"0f133133\", \"0f133134\")","[\"0f1332\", \"0f1333\")","[\"0f1333\", \"0f1334\")","[\"0f2000\", \"0f2001\")","[\"0f2001\", \"0f2002\")","[\"0f200200\", \"0f200201\")","[\"0f2003\", \"0f2004\")","[\"0f3110\", \"0f3111\")","[\"0f3111\", \"0f3112\")","[\"0f3112\", \"0f3113\")","[\"0f311311\", \"0f311312\")"]},"keysExamined":1,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":1}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"0f02202\", \"0f02203\")","[\"0f0221\", \"0f0222\")","[\"0f0223\", \"0f0224\")","[\"0f1330\", \"0f1331\")","[\"0f13313\", \"0f13314\")","[\"0f1332\", \"0f1333\")","[\"0f2001\", \"0f2002\")","[\"0f20020\", \"0f20021\")","[\"0f2003\", \"0f2004\")","[\"0f3110\", \"0f3111\")","[\"0f3112\", \"0f3113\")","[\"0f31131\", \"0f31132\")"]},"keysExamined":1,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}}]},"allPlansExecution":[]},"serverInfo":{"host":"siyuan-ws","port":27017,"version":"3.1.0-pre-","gitVersion":"c5fb91085d5083f70b87820a509989b57b521c8a"},"ok":1}</textarea>
       <button id="show_button" type="submit" class="btn btn-primary">Show<span class="glyphicon glyphicon-map-marker"/></button>
+      <button id="prev_button" type="submit" class="btn btn-primary">Prev Stage</button>
+      <button id="next_button" type="submit" class="btn btn-primary">Next Stage</button>
     </div>
 
     <div id="map-canvas"></div>
