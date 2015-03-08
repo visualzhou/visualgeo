@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="initial-scale=1.0, user-scalable=no" />
-    <title>Drag and Drop GeoJSON</title>
+    <title>Visualize MongoDB Geo Query Explain</title>
     <style type="text/css">
       html { height: 100% }
       body { height: 100%; margin: 0; padding: 0; overflow: hidden; }
@@ -31,6 +31,7 @@
     </style>
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.2/css/bootstrap.min.css">
     <script type="text/javascript" src="/static/js/jquery.min.js"></script>
+    <script type="text/javascript" src="/static/js/s2.js"></script>
     <script src="https://maps.googleapis.com/maps/api/js?v=3.exp"></script>
     <script type="text/javascript">
 /* Map functions */
@@ -221,10 +222,20 @@ function translateIndexBoundsToGeoJSON(bounds, processCovering) {
     if (m) cells.push(m[1]);
   });
   // cells ["0f1332332", "0f13323323"]
-  $.post("/parse_cells", {cells: JSON.stringify(cells)}, function(data) {
-    // console.log(data);
-    processCovering(data.polygons);
-  });
+  var polygons = [];
+  cells.forEach(function(cellHash) {
+    var points = Module.translateGeoHash(cellHash);
+    // points is a wrapper of std::vector<LngLat>. LngLat::lng and LngLat::lat are what we need.
+    var loop = []
+    for (var i = 0; i <= points.size(); i++) {
+      // The last LngLat is the same with the first one.
+      var ll = points.get(i % points.size());
+      loop.push([ll.lng, ll.lat]);
+    }
+    polygons.push({ type: "Polygon", coordinates: [loop]});
+  })
+
+  return polygons;
 }
 
 function clearMap() {
@@ -263,12 +274,12 @@ function parseGeoQueryExplain(explain) {
 
   var geoField = get2dSphereField(stage);
   // Convert stage.indexBounds
-  translateIndexBoundsToGeoJSON(stage.indexBounds[geoField], function(covering) {
-    shapeAndCovering = new ShapeAndCovering(0);
-    shapeAndCovering.covering = covering;
-    shapeAndCovering.shape = findField(explain.queryPlanner.parsedQuery, "$geometry");
-    showGeoQueryExplain(shapeAndCovering);
-  });
+  var covering = translateIndexBoundsToGeoJSON(stage.indexBounds[geoField]);
+
+  var shapeAndCovering = new ShapeAndCovering(0);
+  shapeAndCovering.covering = covering;
+  shapeAndCovering.shape = findField(explain.queryPlanner.parsedQuery, "$geometry");
+  showGeoQueryExplain(shapeAndCovering);
 }
 
 
@@ -332,8 +343,8 @@ function parseGeoNearExplain(explain) {
 
   // Search annulus
   rootStage.searchIntervals.forEach(function(interval, idx) {
-    annulus = new Annulus(center, interval.minDistance, interval.maxDistance);
-    shapeAndCovering = new ShapeAndCovering(idx);
+    var annulus = new Annulus(center, interval.minDistance, interval.maxDistance);
+    var shapeAndCovering = new ShapeAndCovering(idx);
     shapeAndCovering.shape = annulus;
     nearExplain.stages.push(shapeAndCovering);
   });
@@ -342,24 +353,12 @@ function parseGeoNearExplain(explain) {
   // TODO: find field name
   var fieldName = Object.getOwnPropertyNames(rootStage.inputStages[0].inputStage.indexBounds)[0];
 
-  function processNearCovering(polygons) {
-    nearExplain.stages[curStage].coverings = polygons;
-
-    curStage++;
-    if (curStage < rootStage.inputStages.length) {
-      translateIndexBoundsToGeoJSON(
-        rootStage.inputStages[curStage].inputStage.indexBounds[fieldName],
-        processNearCovering
-      );
-    } else {
-      showGeoNearExplain();
-    }
-  };
-
-  translateIndexBoundsToGeoJSON(
-    rootStage.inputStages[curStage].inputStage.indexBounds[fieldName],
-    processNearCovering
-  );
+  // Translate S2 GeoHash to GeoJSON polygons
+  for (var i = 0; i < rootStage.inputStages.length; i++) {
+    var bounds = rootStage.inputStages[i].inputStage.indexBounds[fieldName];
+    nearExplain.stages[i].coverings = translateIndexBoundsToGeoJSON(bounds);
+  }
+  showGeoNearExplain();
 
   return nearExplain;
 }

@@ -5,12 +5,14 @@
         <button id="hello-button">Hello!</button>
     </body>
     <script type="text/javascript" src="/static/js/jquery.min.js"></script>
+    <script type="text/javascript" src="/static/js/s2.js"></script>
     <script>
          $(document).ready(function() {
              $('#hello-button').click(function() {
-                 $.post("/unhashs2", {hashs2: '0f022022'}, function(data) {
-                    alert(data);
-                 });
+                 // $.post("/unhashs2", {hashs2: '0f022022'}, function(data) {
+                 //    alert(data);
+                 // });
+                alert("OK");
              })
          })
     </script>
