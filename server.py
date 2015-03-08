@@ -6,7 +6,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    return flask.render_template('index.html')
+    return flask.render_template('geo.html')
 
 @app.route('/demo')
 def demo():
