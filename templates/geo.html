@@ -262,11 +262,8 @@ function showGeoQueryExplain(shapeAndCovering) {
 }
 
 function parseGeoQueryExplain(explain) {
-  var stage = explain.executionStats.executionStages;
-  // TODO: inputStage / executionStats maybe an array.
-  while (stage != null && get2dSphereField(stage) == null) {
-    stage = stage.inputStage;
-  }
+  var execStages = explain.executionStats.executionStages;
+  var stage = findStage(execStages, function(st){return get2dSphereField(st) == null;});
 
   if (stage == null) {
     console.log("cannot find IXSCAN stage in parseGeoQueryExplain");
@@ -328,9 +325,38 @@ function showGeoNearExplain() {
   drawCircle(annulus.center, annulus.max);
 }
 
+/*
+Recursively searches stages, returning the shallowest which satisfies
+the condition function
+@param {Object|Array} root_stage
+@param {Function} condition
+*/
+function findStage(root_stage, condition){
+  var q = [];
+  if(typeof(root_stage) == "array"){
+    q = q.concat(root_stage);
+  } else {
+    q.push(root_stage);
+  }
+  while(q.length > 0){
+    var stage = q.shift();
+    if(condition.call(window, stage)){
+      return stage;
+    } else {
+      if(stage.hasOwnProperty("inputStage")){
+        q.push(stage.inputStage);
+      } else if(stage.hasOwnProperty("inputStages")){
+        q = q.concat(stage.inputStages);
+      }
+    }
+  }
+  return null;
+}
+
 function parseGeoNearExplain(explain) {
-  rootStage = explain.executionStats.executionStages;
-  if (rootStage.stage != "GEO_NEAR_2DSPHERE") return null;
+  var execStages = explain.executionStats.executionStages;
+  var rootStage = findStage(execStages, function(st){return st.stage == "GEO_NEAR_2DSPHERE";});
+  if (!rootStage) return null;
 
   nearExplain = new NearExplain();
   nearExplain.rootStage = rootStage;
@@ -351,14 +377,22 @@ function parseGeoNearExplain(explain) {
   });
 
   var curStage = 0;
-  // TODO: find field name
-  var fieldName = Object.getOwnPropertyNames(rootStage.inputStages[0].inputStage.indexBounds)[0];
+
+  // Get initial indexBounds to find the fieldName used in the query
+  var indexBounds = findStage(rootStage, function(st){return st.hasOwnProperty("indexBounds"); })["indexBounds"];
+  var fieldName = Object.getOwnPropertyNames(indexBounds)[0];
 
   // Translate S2 GeoHash to GeoJSON polygons
-  for (var i = 0; i < rootStage.inputStages.length; i++) {
-    var bounds = rootStage.inputStages[i].inputStage.indexBounds[fieldName];
-    nearExplain.stages[i].coverings = translateIndexBoundsToGeoJSON(bounds);
+  if(rootStage.hasOwnProperty("inputStages")){
+      for (var i = 0; i < rootStage.inputStages.length; i++) {
+        indexBounds = findStage(rootStage.inputStages[i], function(st){return st.hasOwnProperty("indexBounds"); })["indexBounds"];
+        var bounds = indexBounds[fieldName];
+        nearExplain.stages[i].coverings = translateIndexBoundsToGeoJSON(bounds);
+      }
+  } else if(rootStage.hasOwnProperty("inputStage")){
+      nearExplain.stages[0].coverings = translateIndexBoundsToGeoJSON(indexBounds[fieldName]);
   }
+
   showGeoNearExplain();
 
   return nearExplain;
