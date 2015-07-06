@@ -380,6 +380,7 @@ function parseGeoNearExplain(explain) {
 
   // Get initial indexBounds to find the fieldName used in the query
   var indexBounds = findStage(rootStage, function(st){return st.hasOwnProperty("indexBounds"); })["indexBounds"];
+  // TODO: geo field name may not be first (if compound index), in which case fieldName may not be correct
   var fieldName = Object.getOwnPropertyNames(indexBounds)[0];
 
   // Translate S2 GeoHash to GeoJSON polygons
