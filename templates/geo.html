@@ -32,10 +32,10 @@
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.2/css/bootstrap.min.css">
     <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
     <script type="text/javascript" src="/static/js/s2.js"></script>
-    <script src="https://maps.googleapis.com/maps/api/js?v=3.exp"></script>
+    <script type="text/javascript" src="/static/js/console.js"></script>
+    <script src="https://maps.googleapis.com/maps/api/js?v=3.exp&libraries=visualization"></script>
     <script type="text/javascript">
 /* Map functions */
-
 var map;
 var nearExplain;
 
@@ -209,6 +209,18 @@ function findField(node, expectedField) {
   return res;
 }
 
+function translateCellHashToGeoJSON(cellHash) {
+  var points = Module.translateGeoHash(cellHash);
+  // points is a wrapper of std::vector<LngLat>. LngLat::lng and LngLat::lat are what we need.
+  var loop = []
+  for (var i = 0; i <= points.size(); i++) {
+    // The last LngLat is the same with the first one.
+    var ll = points.get(i % points.size());
+    loop.push([ll.lng, ll.lat]);
+  }
+  return { type: "Polygon", coordinates: [loop]};
+}
+
 // bounds is the array of string
 // [
 //   "[\"0f1332332\", \"0f1332332\"]",
@@ -225,15 +237,8 @@ function translateIndexBoundsToGeoJSON(bounds, processCovering) {
   // cells ["0f1332332", "0f13323323"]
   var polygons = [];
   cells.forEach(function(cellHash) {
-    var points = Module.translateGeoHash(cellHash);
-    // points is a wrapper of std::vector<LngLat>. LngLat::lng and LngLat::lat are what we need.
-    var loop = []
-    for (var i = 0; i <= points.size(); i++) {
-      // The last LngLat is the same with the first one.
-      var ll = points.get(i % points.size());
-      loop.push([ll.lng, ll.lat]);
-    }
-    polygons.push({ type: "Polygon", coordinates: [loop]});
+    var polygon = translateCellHashToGeoJSON(cellHash);
+    polygons.push(polygon);
   })
 
   return polygons;
