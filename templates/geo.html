@@ -216,17 +216,26 @@ function findField(node, expectedField) {
 // ]
 function translateIndexBoundsToGeoJSON(bounds, processCovering) {
   // Only show intervals, no points
-  var startRe = /\"(\w*)\".*\)$/;
+  var boundRe = /\W(.*),\s*(.*)\W$/;
   var cells = [];
   bounds.forEach(function(bound) {
-    var m = startRe.exec(bound);
-    if (m) cells.push(m[1]);
+    var m = boundRe.exec(bound);
+    // TODO: Given that finest query level is 23, if start == end, that must be a point query.
+    if (m[1] !== m[2]) cells.push({start: m[1], end: m[2]});
   });
   // cells ["0f1332332", "0f13323323"]
   var polygons = [];
-  cells.forEach(function(cellHash) {
-    var points = Module.translateGeoHash(cellHash);
-    // points is a wrapper of std::vector<LngLat>. LngLat::lng and LngLat::lat are what we need.
+  cells.forEach(function(cell) {
+    var points = []
+    if (cell.start.startsWith('"')) {
+      // '"0f1332332"'
+      points = Module.translateGeoHash(cell.start.slice(1, -1));
+      // points is a wrapper of std::vector<LngLat>. LngLat::lng and LngLat::lat are what we need.
+    } else {
+      // '563805707163664385'
+      points = Module.translateGeoHashFromNumbers(cell.start, cell.end);
+    }
+
     var loop = []
     for (var i = 0; i <= points.size(); i++) {
       // The last LngLat is the same with the first one.
