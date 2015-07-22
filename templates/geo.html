@@ -237,7 +237,7 @@ function translateIndexBoundsToGeoJSON(bounds, processCovering) {
     }
 
     var loop = []
-    for (var i = 0; i <= points.size(); i++) {
+    for (var i = 0; i < points.size(); i++) {
       // The last LngLat is the same with the first one.
       var ll = points.get(i % points.size());
       loop.push([ll.lng, ll.lat]);
