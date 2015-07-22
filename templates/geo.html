@@ -375,7 +375,12 @@ function parseGeoNearExplain(explain) {
   if (nearQueryPred == null) {
     nearQueryPred = findField(explain.queryPlanner.parsedQuery, "$nearSphere");
   }
-  var center = nearQueryPred["$geometry"].coordinates;
+  var center;
+  if (nearQueryPred["$geometry"]) {
+    center = nearQueryPred["$geometry"].coordinates;
+  } else {
+    center = nearQueryPred;
+  }
 
   // Search annulus
   rootStage.searchIntervals.forEach(function(interval, idx) {
