@@ -58,11 +58,12 @@ function loadGeoJsonString(geoString) {
   return loadGeoJson(geojson);
 }
 
-function loadGeoJson(geometry) {
+function loadGeoJson(geometry, properties) {
   var feature = {
     type: "Feature",
     id: 0,
     geometry: geometry,
+    properties: properties,
   }
   var res = map.data.addGeoJson(feature);
   zoom(map);
@@ -320,7 +321,8 @@ function drawCircle(center, radius) {
     fillOpacity: 0,//0.35,
     map: map,
     center: centerLatLng,
-    radius: radius
+    radius: radius,
+    geodesic: true,
   };
   // Add the circle for this city to the map.
   centerCircle = new google.maps.Circle(populationOptions);
@@ -335,14 +337,6 @@ function showGeoNearExplain() {
   });
 
   // Draw cell union
-  map.data.setStyle(function(feature) {
-      var isCellUnion = feature.extra && feature.extra.cellUnion;
-      var color = isCellUnion ? 'red' : 'grey';
-      return {
-        fillColor: color,
-        strokeWeight: 1
-      };
-  });
   cells = new Module.VectorString();
   for (var i = 0; i < nearExplain.curStage; i++) {
     var stage = nearExplain.stages[i];
@@ -355,6 +349,14 @@ function showGeoNearExplain() {
     var polygon = translateCellIdToGeoJSON(cells.get(i));
     loadGeoJson(polygon, {cellUnion: true});
   }
+  map.data.setStyle(function(feature) {
+    var color = feature.getProperty("cellUnion") ? 'grey' : 'red';
+    return {
+      fillColor: color,
+      strokeWeight: 1,
+      geodesic: true,
+    };
+  });
 
   var annulus = nearExplain.stages[nearExplain.curStage].shape;
   drawCircle(annulus.center, annulus.min);
