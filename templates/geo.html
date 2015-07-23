@@ -209,43 +209,45 @@ function findField(node, expectedField) {
   return res;
 }
 
+
 // bounds is the array of string
 // [
 //   "[\"0f1332332\", \"0f1332332\"]",
 //   "[\"0f13323323\", \"0f13323323\"]",
 // ]
-function translateIndexBoundsToGeoJSON(bounds, processCovering) {
+function translateIndexBoundsToCellIds(bounds) {
   // Only show intervals, no points
   var boundRe = /\W(.*),\s*(.*)\W$/;
-  var cells = [];
+  var cellBounds = [];
   bounds.forEach(function(bound) {
     var m = boundRe.exec(bound);
     // TODO: Given that finest query level is 23, if start == end, that must be a point query.
-    if (m[1] !== m[2]) cells.push({start: m[1], end: m[2]});
+    if (m[1] !== m[2]) cellBounds.push({start: m[1], end: m[2]});
   });
-  // cells ["0f1332332", "0f13323323"]
-  var polygons = [];
-  cells.forEach(function(cell) {
-    var points = []
+  var cellIds = [];
+  // cellBounds ["0f1332332", "0f13323323"]
+  cellBounds.forEach(function(cell) {
     if (cell.start.startsWith('"')) {
       // '"0f1332332"'
-      points = Module.translateGeoHash(cell.start.slice(1, -1));
-      // points is a wrapper of std::vector<LngLat>. LngLat::lng and LngLat::lat are what we need.
+      cellIds.push(cell.start.slice(1, -1));
     } else {
       // '563805707163664385'
-      points = Module.translateGeoHashFromNumbers(cell.start, cell.end);
+      var cellId = Module.getCellIdFromMinMax(cell.start, cell.end);
+      cellIds.push(cellId);
     }
+  });
+  return cellIds;
+}
 
-    var loop = []
+function translateCellIdToGeoJSON(cellId) {
+    var points = Module.getPolygonFromCellId(cellId);
+    var loop = [];
     for (var i = 0; i < points.size(); i++) {
       // The last LngLat is the same with the first one.
       var ll = points.get(i % points.size());
       loop.push([ll.lng, ll.lat]);
     }
-    polygons.push({ type: "Polygon", coordinates: [loop]});
-  })
-
-  return polygons;
+    return { type: "Polygon", coordinates: [loop]};
 }
 
 function clearMap() {
@@ -264,7 +266,8 @@ function clearMap() {
 function showGeoQueryExplain(shapeAndCovering) {
   clearMap();
   loadGeoJson(shapeAndCovering.shape);
-  shapeAndCovering.covering.forEach(function(polygon) {
+  shapeAndCovering.covering.forEach(function(cellId) {
+    var polygon = translateCellIdToGeoJSON(cellId);
     loadGeoJson(polygon);
   });
   // TODO: Add style.
@@ -281,7 +284,7 @@ function parseGeoQueryExplain(explain) {
 
   var geoField = get2dSphereField(stage);
   // Convert stage.indexBounds
-  var covering = translateIndexBoundsToGeoJSON(stage.indexBounds[geoField]);
+  var covering = translateIndexBoundsToCellIds(stage.indexBounds[geoField]);
 
   var shapeAndCovering = new ShapeAndCovering(0);
   shapeAndCovering.covering = covering;
@@ -326,9 +329,33 @@ function drawCircle(center, radius) {
 
 function showGeoNearExplain() {
   clearMap();
-  nearExplain.stages[nearExplain.curStage].coverings.forEach(function(polygon) {
+  nearExplain.stages[nearExplain.curStage].coverings.forEach(function(cellId) {
+    var polygon = translateCellIdToGeoJSON(cellId);
     loadGeoJson(polygon);
   });
+
+  // Draw cell union
+  map.data.setStyle(function(feature) {
+      var isCellUnion = feature.extra && feature.extra.cellUnion;
+      var color = isCellUnion ? 'red' : 'grey';
+      return {
+        fillColor: color,
+        strokeWeight: 1
+      };
+  });
+  cells = new Module.VectorString();
+  for (var i = 0; i < nearExplain.curStage; i++) {
+    var stage = nearExplain.stages[i];
+    stage.coverings.forEach(function(cellId) {
+      cells.push_back(cellId);
+    });
+  }
+  cells = Module.getCellUnion(cells);
+  for (var i = 0; i < cells.size(); i++) {
+    var polygon = translateCellIdToGeoJSON(cells.get(i));
+    loadGeoJson(polygon, {cellUnion: true});
+  }
+
   var annulus = nearExplain.stages[nearExplain.curStage].shape;
   drawCircle(annulus.center, annulus.min);
   drawCircle(annulus.center, annulus.max);
@@ -402,10 +429,10 @@ function parseGeoNearExplain(explain) {
       for (var i = 0; i < rootStage.inputStages.length; i++) {
         indexBounds = findStage(rootStage.inputStages[i], function(st){return st.hasOwnProperty("indexBounds"); })["indexBounds"];
         var bounds = indexBounds[fieldName];
-        nearExplain.stages[i].coverings = translateIndexBoundsToGeoJSON(bounds);
+        nearExplain.stages[i].coverings = translateIndexBoundsToCellIds(bounds);
       }
   } else if(rootStage.hasOwnProperty("inputStage")){
-      nearExplain.stages[0].coverings = translateIndexBoundsToGeoJSON(indexBounds[fieldName]);
+      nearExplain.stages[0].coverings = translateIndexBoundsToCellIds(indexBounds[fieldName]);
   }
 
   showGeoNearExplain();
