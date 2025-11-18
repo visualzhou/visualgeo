@@ -7,7 +7,35 @@
     <style type="text/css">
       html { height: 100% }
       body { height: 100%; margin: 0; padding: 0; overflow: hidden; }
-      #map-canvas { height: 100% }
+      #map-canvas { 
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 0;
+      }
+      #controls {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 1000;
+        background: white;
+        padding: 10px;
+        border-radius: 5px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        max-width: 600px;
+        resize: both;
+        overflow: auto;
+      }
+      #explain_text {
+        width: 100%;
+        min-width: 300px;
+        min-height: 80px;
+        margin-bottom: 10px;
+        resize: both;
+        box-sizing: border-box;
+      }
       #drop-container {
         display: none;
         height: 100%;
@@ -30,31 +58,68 @@
       }
     </style>
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script type="text/javascript">
+      // Set up Module configuration BEFORE loading s2.js
+      var Module = {
+        onRuntimeInitialized: function() {
+          console.log("S2 Module initialized successfully");
+          window.s2ModuleReady = true;
+        }
+      };
+      window.s2ModuleReady = false;
+    </script>
     <script type="text/javascript" src="/static/js/s2.js"></script>
-    <script src="https://maps.googleapis.com/maps/api/js?v=3.exp"></script>
     <script type="text/javascript">
 /* Map functions */
 
 var map;
 var nearExplain;
+var geoJsonLayers = []; // Store all GeoJSON layers for clearing
 
 function initMap() {
-  // set up the map
-  map = new google.maps.Map(document.getElementById('map-canvas'), {
-    center: new google.maps.LatLng(0, 0),
-    zoom: 2
-  });
+  // set up the map with Leaflet
+  map = L.map('map-canvas').setView([0, 0], 2);
+  
+  // Add OpenStreetMap tiles
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+}
 
-  map.data.setStyle({
-    fillOpacity: 0.2,
-    strokeWeight: 1,
-    geodesic: true
-  })
+function parseRelaxedJSON(jsonString) {
+  // Strip out MongoDB-specific types
+  let cleaned = jsonString;
+  
+  // Remove $clusterTime object (which has nested structure)
+  // This regex handles one level of nesting for the signature object
+  cleaned = cleaned.replace(/['"]?\$clusterTime['"]?\s*:\s*\{(?:[^{}]|\{[^{}]*\})*\}\s*,?/g, '');
+  
+  // Remove Binary.createFromBase64(...) and replace with a string
+  // cleaned = cleaned.replace(/Binary\.createFromBase64\(\s*'([^']*)',\s*\d+\s*\)/g, '"$1"');
+  // cleaned = cleaned.replace(/Binary\.createFromBase64\(\s*"([^"]*)",\s*\d+\s*\)/g, '"$1"');
+  
+  // Remove Timestamp(...) and replace with the inner object
+  cleaned = cleaned.replace(/(Timestamp\([^)]*\))/g, '"{$1}"');
+  
+  // Remove Long(...) and replace with the inner value
+  cleaned = cleaned.replace(/Long\(\s*'([^']*)'\s*\)/g, '"$1"');
+  
+  // Add quotes to unquoted keys - match key: value patterns
+  // This regex looks for word characters followed by colon, ensuring it's not already quoted
+  cleaned = cleaned.replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:/g, '$1"$2":');
+
+  // Replace single quotes with double quotes.
+  cleaned = cleaned.replace(/'/g, '"');
+  
+  return JSON.parse(cleaned);
 }
 
 function loadGeoJsonString(geoString) {
-  var geojson = JSON.parse(geoString);
+  var geojson = parseRelaxedJSON(geoString);
   return loadGeoJson(geojson);
 }
 
@@ -63,42 +128,67 @@ function loadGeoJson(geometry, properties) {
     type: "Feature",
     id: 0,
     geometry: geometry,
-    properties: properties,
+    properties: properties || {},
   }
-  var res = map.data.addGeoJson(feature);
-  zoom(map);
-  return res
+  
+  // Determine style based on properties
+  var style = {
+    fillColor: properties && properties.cellUnion ? 'grey' : (properties && properties.covering ? 'blue' : 'red'),
+    fillOpacity: properties && properties.cellUnion ? 0.1 : (properties && properties.covering ? 0.3 : 0.2),
+    color: properties && properties.cellUnion ? 'grey' : (properties && properties.covering ? 'blue' : 'red'),
+    weight: properties && properties.covering ? 2 : 1
+  };
+  
+  var layer = L.geoJSON(feature, {
+    style: style
+  }).addTo(map);
+  
+  geoJsonLayers.push(layer);
+  zoom();
+  return layer;
 }
 
 /**
- * Update a map's viewport to fit each geometry in a dataset
- * @param {google.maps.Map} map The map to adjust
+ * Update a map's viewport to fit all geometry layers
  */
-function zoom(map) {
-  var bounds = new google.maps.LatLngBounds();
-  map.data.forEach(function(feature) {
-    processPoints(feature.getGeometry(), bounds.extend, bounds);
-  });
-  map.fitBounds(bounds);
-}
-
-/**
- * Process each point in a Geometry, regardless of how deep the points may lie.
- * @param {google.maps.Data.Geometry} geometry The structure to process
- * @param {function(google.maps.LatLng)} callback A function to call on each
- *     LatLng point encountered (e.g. Array.push)
- * @param {Object} thisArg The value of 'this' as provided to 'callback' (e.g.
- *     myArray)
- */
-function processPoints(geometry, callback, thisArg) {
-  if (geometry instanceof google.maps.LatLng) {
-    callback.call(thisArg, geometry);
-  } else if (geometry instanceof google.maps.Data.Point) {
-    callback.call(thisArg, geometry.get());
-  } else {
-    geometry.getArray().forEach(function(g) {
-      processPoints(g, callback, thisArg);
+function zoom() {
+  if (geoJsonLayers.length === 0) return;
+  
+  var group = L.featureGroup(geoJsonLayers);
+  if (nearExplain && nearExplain.drawing) {
+    nearExplain.drawing.forEach(function(circle) {
+      group.addLayer(circle);
     });
+  }
+  
+  try {
+    var bounds = group.getBounds();
+    
+    // Check if bounds are valid (not infinite or spanning the whole world)
+    var sw = bounds.getSouthWest();
+    var ne = bounds.getNorthEast();
+    var latSpan = Math.abs(ne.lat - sw.lat);
+    var lngSpan = Math.abs(ne.lng - sw.lng);
+    
+    // If bounds are suspiciously large (e.g., spanning more than 90 degrees),
+    // it might be due to large S2 cells in the covering. Use a more conservative zoom.
+    if (latSpan > 90 || lngSpan > 90) {
+      console.warn("Bounds are very large, using conservative zoom level");
+      // Calculate center
+      var centerLat = (ne.lat + sw.lat) / 2;
+      var centerLng = (ne.lng + sw.lng) / 2;
+      map.setView([centerLat, centerLng], 4);
+    } else {
+      // Add padding to prevent over-zooming on small geometries
+      map.fitBounds(bounds, {
+        padding: [50, 50],
+        maxZoom: 18  // Prevent excessive zoom for very small areas
+      });
+    }
+  } catch (e) {
+    console.error("Error fitting bounds:", e);
+    // Fallback to a reasonable default view if bounds fail
+    map.setView([0, 0], 2);
   }
 }
 
@@ -194,6 +284,14 @@ function get2dSphereField(stage) {
 
 function findField(node, expectedField) {
   res = null;
+  if (node instanceof Array) {
+    for (let entry of node) {
+      res = findField(entry, expectedField);
+      if (res != null) {
+        return res;
+      }
+    }
+  }
   if (node === null || typeof node !== 'object') {
     return null;
   }
@@ -205,6 +303,9 @@ function findField(node, expectedField) {
       return node[field];
     } else {
       res = findField(node[field], expectedField);
+      if (res != null) {
+        return res;
+      }
     }
   }
   return res;
@@ -252,14 +353,17 @@ function translateCellIdToGeoJSON(cellId) {
 }
 
 function clearMap() {
-  map.data.forEach(function(feature) {
-    map.data.remove(feature)
-  })
-  if (nearExplain) {
-    nearExplain.drawing.forEach(function(d) {
-      d.setVisible(false);
-      d.setMap(null);
-    })
+  // Remove all GeoJSON layers
+  geoJsonLayers.forEach(function(layer) {
+    map.removeLayer(layer);
+  });
+  geoJsonLayers = [];
+  
+  // Remove circle drawings
+  if (nearExplain && nearExplain.drawing) {
+    nearExplain.drawing.forEach(function(circle) {
+      map.removeLayer(circle);
+    });
     nearExplain.drawing = [];
   }
 }
@@ -269,21 +373,21 @@ function showGeoQueryExplain(shapeAndCovering) {
   loadGeoJson(shapeAndCovering.shape);
   shapeAndCovering.covering.forEach(function(cellId) {
     var polygon = translateCellIdToGeoJSON(cellId);
-    loadGeoJson(polygon);
+    loadGeoJson(polygon, {covering: true});
   });
-  // TODO: Add style.
 }
 
 function parseGeoQueryExplain(explain) {
   var execStages = explain.executionStats.executionStages;
-  var stage = findStage(execStages, function(st){return get2dSphereField(st) == null;});
+  var stage = findStage(execStages, function(st){return get2dSphereField(st) != null;});
 
   if (stage == null) {
-    console.log("cannot find IXSCAN stage in parseGeoQueryExplain");
+    console.log("No geo stage found in explain");
     return;
   }
 
   var geoField = get2dSphereField(stage);
+  
   // Convert stage.indexBounds
   var covering = translateIndexBoundsToCellIds(stage.indexBounds[geoField]);
 
@@ -312,28 +416,26 @@ function NearExplain() {
 }
 
 function drawCircle(center, radius) {
-  var centerLatLng = new google.maps.LatLng(center[1], center[0]);
-  var populationOptions = {
-    strokeColor: '#FF0000',
-    strokeOpacity: 0.8,
-    strokeWeight: 4,
+  // Leaflet uses [lat, lng] order, center is [lng, lat]
+  var circle = L.circle([center[1], center[0]], {
+    color: '#FF0000',
+    opacity: 0.8,
+    weight: 4,
     fillColor: '#FF0000',
-    fillOpacity: 0,//0.35,
-    map: map,
-    center: centerLatLng,
-    radius: radius,
-    geodesic: true,
-  };
-  // Add the circle for this city to the map.
-  centerCircle = new google.maps.Circle(populationOptions);
-  nearExplain.drawing.push(centerCircle);
+    fillOpacity: 0,
+    radius: radius  // radius in meters
+  }).addTo(map);
+  
+  nearExplain.drawing.push(circle);
+  geoJsonLayers.push(circle);  // Also add to geoJsonLayers for bounds calculation
 }
 
 function showGeoNearExplain() {
   clearMap();
+  
   nearExplain.stages[nearExplain.curStage].coverings.forEach(function(cellId) {
     var polygon = translateCellIdToGeoJSON(cellId);
-    loadGeoJson(polygon);
+    loadGeoJson(polygon, {covering: true});
   });
 
   // Draw cell union
@@ -349,18 +451,14 @@ function showGeoNearExplain() {
     var polygon = translateCellIdToGeoJSON(cells.get(i));
     loadGeoJson(polygon, {cellUnion: true});
   }
-  map.data.setStyle(function(feature) {
-    var color = feature.getProperty("cellUnion") ? 'grey' : 'red';
-    return {
-      fillColor: color,
-      strokeWeight: 1,
-      geodesic: true,
-    };
-  });
+  
+  // Styles are now handled in loadGeoJson based on properties
 
   var annulus = nearExplain.stages[nearExplain.curStage].shape;
   drawCircle(annulus.center, annulus.min);
   drawCircle(annulus.center, annulus.max);
+  
+  zoom();
 }
 
 /*
@@ -394,7 +492,9 @@ function findStage(root_stage, condition){
 function parseGeoNearExplain(explain) {
   var execStages = explain.executionStats.executionStages;
   var rootStage = findStage(execStages, function(st){return st.stage == "GEO_NEAR_2DSPHERE";});
-  if (!rootStage) return null;
+  if (!rootStage) {
+    return null;
+  }
 
   nearExplain = new NearExplain();
   nearExplain.rootStage = rootStage;
@@ -403,6 +503,9 @@ function parseGeoNearExplain(explain) {
   var nearQueryPred = findField(explain.queryPlanner.parsedQuery, "$near");
   if (nearQueryPred == null) {
     nearQueryPred = findField(explain.queryPlanner.parsedQuery, "$nearSphere");
+  }
+  if (nearQueryPred == null) {
+    console.log("Could not find geo predicate within: ", explain.queryPlanner.parsedQuery)
   }
   var center;
   if (nearQueryPred["$geometry"]) {
@@ -422,16 +525,45 @@ function parseGeoNearExplain(explain) {
   var curStage = 0;
 
   // Get initial indexBounds to find the fieldName used in the query
-  var indexBounds = findStage(rootStage, function(st){return st.hasOwnProperty("indexBounds"); })["indexBounds"];
-  // TODO: geo field name may not be first (if compound index), in which case fieldName may not be correct
-  var fieldName = Object.getOwnPropertyNames(indexBounds)[0];
+  var indexBoundsStage = findStage(rootStage, function(st){return st.hasOwnProperty("indexBounds"); });
+  
+  if (!indexBoundsStage) {
+    console.error("No indexBounds found in rootStage");
+    showGeoNearExplain();
+    return nearExplain;
+  }
+  
+  var indexBounds = indexBoundsStage["indexBounds"];
+  
+  // Find the geo field name using get2dSphereField, or by finding bounds that look like S2 cell IDs
+  var fieldName = get2dSphereField(indexBoundsStage);
+  if (!fieldName) {
+    // Fallback: find the field with S2-style bounds (strings that look like cell IDs, not booleans)
+    var fieldNames = Object.getOwnPropertyNames(indexBounds);
+    for (var i = 0; i < fieldNames.length; i++) {
+      var bounds = indexBounds[fieldNames[i]];
+      if (bounds && bounds.length > 0 && typeof bounds[0] === 'string' && bounds[0].length > 10 && bounds[0].indexOf('[') !== 0) {
+        fieldName = fieldNames[i];
+        break;
+      }
+    }
+  }
+  
+  if (!fieldName) {
+    console.error("Could not find geo field in indexBounds");
+    showGeoNearExplain();
+    return nearExplain;
+  }
 
   // Translate S2 GeoHash to GeoJSON polygons
   if(rootStage.hasOwnProperty("inputStages")){
       for (var i = 0; i < rootStage.inputStages.length; i++) {
-        indexBounds = findStage(rootStage.inputStages[i], function(st){return st.hasOwnProperty("indexBounds"); })["indexBounds"];
-        var bounds = indexBounds[fieldName];
-        nearExplain.stages[i].coverings = translateIndexBoundsToCellIds(bounds);
+        var stageWithBounds = findStage(rootStage.inputStages[i], function(st){return st.hasOwnProperty("indexBounds"); });
+        if (stageWithBounds) {
+          indexBounds = stageWithBounds["indexBounds"];
+          var bounds = indexBounds[fieldName];
+          nearExplain.stages[i].coverings = translateIndexBoundsToCellIds(bounds);
+        }
       }
   } else if(rootStage.hasOwnProperty("inputStage")){
       nearExplain.stages[0].coverings = translateIndexBoundsToCellIds(indexBounds[fieldName]);
@@ -445,20 +577,37 @@ function parseGeoNearExplain(explain) {
 function parseExplain(explain) {
   clearMap();
   nearExplain = null;
-  if (parseGeoNearExplain(explain)) return;
+  var isNear = parseGeoNearExplain(explain);
+  if (isNear) return;
   parseGeoQueryExplain(explain);
 }
 
 // ----------- Geo Near -----------
 
-google.maps.event.addDomListener(window, 'load', function() {
+window.addEventListener('load', function() {
   initMap();
   initEvents();
 });
 
 $(document).ready(function() {
    $('#show_button').click(function() {
-      parseExplain(JSON.parse($('#explain_text').val()));
+      try {
+        // Check if S2 Module is ready
+        if (typeof Module === 'undefined' || !window.s2ModuleReady) {
+          alert("S2 Module is still loading. Please wait a moment and try again.");
+          console.log("Module defined:", typeof Module !== 'undefined', "Module ready:", window.s2ModuleReady);
+          return;
+        }
+        
+        var jsonText = $('#explain_text').val();
+        console.log("Parsing JSON of length:", jsonText.length);
+        var explainData = parseRelaxedJSON(jsonText);
+        console.log("JSON parsed successfully");
+        parseExplain(explainData);
+      } catch (e) {
+        console.error("Error details:", e);
+        alert("Error: " + e.name + ": " + e.message + "\n\nCheck the console for more details.");
+      }
    });
 
    $('#prev_button').click(function() {
@@ -486,9 +635,9 @@ $(document).ready(function() {
     </script>
   </head>
   <body>
-    <div>
+    <div id="controls">
       <textarea class="form-control" id="explain_text" cols="30" rows="3">
-{"queryPlanner":{"plannerVersion":1,"namespace":"test.geogeo","indexFilterSet":false,"parsedQuery":{"loc":{"$nearSphere":{"$geometry":{"type":"Point","coordinates":[-73.98784,40.75747]},"$maxDistance":1000000}}},"winningPlan":{"stage":"GEO_NEAR_2DSPHERE","keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","inputStages":[{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320102\", \"4f10320102\"]","[\"4f103201020\", \"4f103201020\"]","[\"4f1032010202\", \"4f1032010203\")","[\"4f103201021\", \"4f103201021\"]","[\"4f1032010213\", \"4f1032010213\"]","[\"4f10320102133\", \"4f10320102134\")","[\"4f103201022\", \"4f103201023\")","[\"4f103201023\", \"4f103201024\")","[\"4f10320103\", \"4f10320103\"]","[\"4f103201030\", \"4f103201030\"]","[\"4f1032010300\", \"4f1032010301\")","[\"4f1032011\", \"4f1032011\"]","[\"4f10320110\", \"4f10320110\"]","[\"4f103201101\", \"4f103201101\"]","[\"4f1032011011\", \"4f1032011011\"]","[\"4f10320110111\", \"4f10320110112\")","[\"4f10320113\", \"4f10320113\"]","[\"4f103201132\", \"4f103201133\")","[\"4f103201133\", \"4f103201134\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320100\", \"4f10320100\"]","[\"4f103201002\", \"4f103201003\")","[\"4f10320101\", \"4f10320102\")","[\"4f10320102\", \"4f10320103\")","[\"4f10320103\", \"4f10320104\")","[\"4f1032011\", \"4f1032012\")","[\"4f1032012\", \"4f1032012\"]","[\"4f10320120\", \"4f10320121\")","[\"4f1032013\", \"4f1032013\"]","[\"4f10320131\", \"4f10320132\")","[\"4f10320132\", \"4f10320132\"]","[\"4f103201321\", \"4f103201322\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032002\", \"4f1032003\")","[\"4f1032003\", \"4f1032004\")","[\"4f1032010\", \"4f1032011\")","[\"4f1032011\", \"4f1032012\")","[\"4f1032012\", \"4f1032013\")","[\"4f1032013\", \"4f1032014\")","[\"4f1032020\", \"4f1032021\")","[\"4f1032021\", \"4f1032021\"]","[\"4f10320210\", \"4f10320211\")","[\"4f1032321\", \"4f1032321\"]","[\"4f10323212\", \"4f10323213\")","[\"4f1032322\", \"4f1032323\")","[\"4f1033033\", \"4f1033033\"]","[\"4f10330333\", \"4f10330334\")","[\"4f1033100\", \"4f1033101\")","[\"4f1033103\", \"4f1033104\")","[\"4f1033110\", \"4f1033110\"]","[\"4f10331100\", \"4f10331100\"]","[\"4f103311000\", \"4f103311001\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032000\", \"4f1032001\")","[\"4f1032001\", \"4f1032002\")","[\"4f1032002\", \"4f1032003\")","[\"4f1032003\", \"4f1032004\")","[\"4f1032012\", \"4f1032013\")","[\"4f1032013\", \"4f1032013\"]","[\"4f10320133\", \"4f10320133\"]","[\"4f103201333\", \"4f103201333\"]","[\"4f1032013333\", \"4f1032013333\"]","[\"4f10320133333\", \"4f10320133334\")","[\"4f1032020\", \"4f1032021\")","[\"4f1032021\", \"4f1032022\")","[\"4f1032022\", \"4f1032023\")","[\"4f1032023\", \"4f1032024\")","[\"4f1032030\", \"4f1032031\")","[\"4f1032031\", \"4f1032032\")","[\"4f1032032\", \"4f1032033\")","[\"4f1032033\", \"4f1032033\"]","[\"4f10320331\", \"4f10320332\")","[\"4f1032311\", \"4f1032312\")","[\"4f1032312\", \"4f1032313\")","[\"4f1032313\", \"4f1032314\")","[\"4f1032320\", \"4f1032321\")","[\"4f1032321\", \"4f1032322\")","[\"4f1032322\", \"4f1032323\")","[\"4f1032323\", \"4f1032324\")","[\"4f1033020\", \"4f1033020\"]","[\"4f10330201\", \"4f10330201\"]","[\"4f103302011\", \"4f103302011\"]","[\"4f1033020111\", \"4f1033020112\")","[\"4f1033023\", \"4f1033024\")","[\"4f1033030\", \"4f1033031\")","[\"4f1033031\", \"4f1033032\")","[\"4f1033032\", \"4f1033033\")","[\"4f1033033\", \"4f1033034\")","[\"4f1033100\", \"4f1033101\")","[\"4f1033101\", \"4f1033102\")","[\"4f1033102\", \"4f1033103\")","[\"4f1033103\", \"4f1033104\")","[\"4f1033110\", \"4f1033111\")","[\"4f1033111\", \"4f1033112\")","[\"4f1033112\", \"4f1033112\"]","[\"4f10331120\", \"4f10331120\"]","[\"4f103311200\", \"4f103311201\")","[\"4f1033113\", \"4f1033114\")","[\"4f1033120\", \"4f1033120\"]","[\"4f10331200\", \"4f10331200\"]","[\"4f103312000\", \"4f103312000\"]","[\"4f1033120000\", \"4f1033120001\")","[\"4f1033131\", \"4f1033132\")","[\"4f1033132\", \"4f1033133\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1211122\", \"2f1211122\"]","[\"2f12111222\", \"2f12111223\")","[\"2f12112\", \"2f12113\")","[\"2f12121\", \"2f12122\")","[\"4f1030122\", \"4f1030122\"]","[\"4f10301222\", \"4f10301223\")","[\"4f10302\", \"4f10303\")","[\"4f10312\", \"4f10313\")","[\"4f10313\", \"4f10314\")","[\"4f10320\", \"4f10321\")","[\"4f10321\", \"4f10322\")","[\"4f10322\", \"4f10323\")","[\"4f10323\", \"4f10324\")","[\"4f10330\", \"4f10331\")","[\"4f10331\", \"4f10332\")","[\"4f10332\", \"4f10333\")","[\"4f10333\", \"4f10334\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1122\", \"2f1123\")","[\"2f1211\", \"2f1212\")","[\"2f1212\", \"2f1213\")","[\"2f1221\", \"2f1222\")","[\"4f1001\", \"4f1002\")","[\"4f1002\", \"4f1003\")","[\"4f1020\", \"4f1021\")","[\"4f102322\", \"4f102323\")","[\"4f1030\", \"4f1031\")","[\"4f1031\", \"4f1032\")","[\"4f1032\", \"4f1033\")","[\"4f1033\", \"4f1034\")","[\"4f1100\", \"4f1101\")","[\"4f1101\", \"4f1102\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1122\", \"2f1123\")","[\"2f1210\", \"2f1211\")","[\"2f1211\", \"2f1212\")","[\"2f1212\", \"2f1213\")","[\"2f1213\", \"2f1214\")","[\"2f1220333\", \"2f1220333\"]","[\"2f12203333\", \"2f12203334\")","[\"2f1221\", \"2f1222\")","[\"4f1000\", \"4f1001\")","[\"4f1001\", \"4f1002\")","[\"4f1002\", \"4f1003\")","[\"4f10031\", \"4f10032\")","[\"4f10133\", \"4f10134\")","[\"4f1020\", \"4f1021\")","[\"4f1023\", \"4f1024\")","[\"4f1030\", \"4f1031\")","[\"4f103111\", \"4f103112\")","[\"4f1100\", \"4f1101\")","[\"4f1101\", \"4f1102\")"]}}}]},"rejectedPlans":[]},"executionStats":{"executionSuccess":true,"nReturned":4,"executionTimeMillis":3,"totalKeysExamined":22,"totalDocsExamined":4,"executionStages":{"stage":"GEO_NEAR_2DSPHERE","nReturned":4,"executionTimeMillisEstimate":0,"works":44,"advanced":4,"needTime":39,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","searchIntervals":[{"minDistance":0,"maxDistance":13633.317181384604,"maxInclusive":false},{"minDistance":13633.317181384604,"maxDistance":40899.95154415381,"maxInclusive":false},{"minDistance":40899.95154415381,"maxDistance":95433.22026969222,"maxInclusive":false},{"minDistance":95433.22026969222,"maxDistance":204499.75772076903,"maxInclusive":false},{"minDistance":204499.75772076903,"maxDistance":422632.8326229227,"maxInclusive":false},{"minDistance":422632.8326229227,"maxDistance":858898.9824272301,"maxInclusive":false},{"minDistance":858898.9824272301,"maxDistance":1000000,"maxInclusive":true}],"inputStages":[{"stage":"FETCH","nReturned":2,"executionTimeMillisEstimate":0,"works":5,"advanced":2,"needTime":2,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":2,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":2,"executionTimeMillisEstimate":0,"works":4,"advanced":2,"needTime":2,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320102\", \"4f10320102\"]","[\"4f103201020\", \"4f103201020\"]","[\"4f1032010202\", \"4f1032010203\")","[\"4f103201021\", \"4f103201021\"]","[\"4f1032010213\", \"4f1032010213\"]","[\"4f10320102133\", \"4f10320102134\")","[\"4f103201022\", \"4f103201023\")","[\"4f103201023\", \"4f103201024\")","[\"4f10320103\", \"4f10320103\"]","[\"4f103201030\", \"4f103201030\"]","[\"4f1032010300\", \"4f1032010301\")","[\"4f1032011\", \"4f1032011\"]","[\"4f10320110\", \"4f10320110\"]","[\"4f103201101\", \"4f103201101\"]","[\"4f1032011011\", \"4f1032011011\"]","[\"4f10320110111\", \"4f10320110112\")","[\"4f10320113\", \"4f10320113\"]","[\"4f103201132\", \"4f103201133\")","[\"4f103201133\", \"4f103201134\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":2}},{"stage":"FETCH","nReturned":1,"executionTimeMillisEstimate":0,"works":5,"advanced":1,"needTime":3,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":1,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":1,"executionTimeMillisEstimate":0,"works":4,"advanced":1,"needTime":3,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320100\", \"4f10320100\"]","[\"4f103201002\", \"4f103201003\")","[\"4f10320101\", \"4f10320102\")","[\"4f10320102\", \"4f10320103\")","[\"4f10320103\", \"4f10320104\")","[\"4f1032011\", \"4f1032012\")","[\"4f1032012\", \"4f1032012\"]","[\"4f10320120\", \"4f10320121\")","[\"4f1032013\", \"4f1032013\"]","[\"4f10320131\", \"4f10320132\")","[\"4f10320132\", \"4f10320132\"]","[\"4f103201321\", \"4f103201322\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":1}},{"stage":"FETCH","nReturned":1,"executionTimeMillisEstimate":0,"works":5,"advanced":1,"needTime":3,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":1,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":1,"executionTimeMillisEstimate":0,"works":4,"advanced":1,"needTime":3,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032002\", \"4f1032003\")","[\"4f1032003\", \"4f1032004\")","[\"4f1032010\", \"4f1032011\")","[\"4f1032011\", \"4f1032012\")","[\"4f1032012\", \"4f1032013\")","[\"4f1032013\", \"4f1032014\")","[\"4f1032020\", \"4f1032021\")","[\"4f1032021\", \"4f1032021\"]","[\"4f10320210\", \"4f10320211\")","[\"4f1032321\", \"4f1032321\"]","[\"4f10323212\", \"4f10323213\")","[\"4f1032322\", \"4f1032323\")","[\"4f1033033\", \"4f1033033\"]","[\"4f10330333\", \"4f10330334\")","[\"4f1033100\", \"4f1033101\")","[\"4f1033103\", \"4f1033104\")","[\"4f1033110\", \"4f1033110\"]","[\"4f10331100\", \"4f10331100\"]","[\"4f103311000\", \"4f103311001\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":1}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032000\", \"4f1032001\")","[\"4f1032001\", \"4f1032002\")","[\"4f1032002\", \"4f1032003\")","[\"4f1032003\", \"4f1032004\")","[\"4f1032012\", \"4f1032013\")","[\"4f1032013\", \"4f1032013\"]","[\"4f10320133\", \"4f10320133\"]","[\"4f103201333\", \"4f103201333\"]","[\"4f1032013333\", \"4f1032013333\"]","[\"4f10320133333\", \"4f10320133334\")","[\"4f1032020\", \"4f1032021\")","[\"4f1032021\", \"4f1032022\")","[\"4f1032022\", \"4f1032023\")","[\"4f1032023\", \"4f1032024\")","[\"4f1032030\", \"4f1032031\")","[\"4f1032031\", \"4f1032032\")","[\"4f1032032\", \"4f1032033\")","[\"4f1032033\", \"4f1032033\"]","[\"4f10320331\", \"4f10320332\")","[\"4f1032311\", \"4f1032312\")","[\"4f1032312\", \"4f1032313\")","[\"4f1032313\", \"4f1032314\")","[\"4f1032320\", \"4f1032321\")","[\"4f1032321\", \"4f1032322\")","[\"4f1032322\", \"4f1032323\")","[\"4f1032323\", \"4f1032324\")","[\"4f1033020\", \"4f1033020\"]","[\"4f10330201\", \"4f10330201\"]","[\"4f103302011\", \"4f103302011\"]","[\"4f1033020111\", \"4f1033020112\")","[\"4f1033023\", \"4f1033024\")","[\"4f1033030\", \"4f1033031\")","[\"4f1033031\", \"4f1033032\")","[\"4f1033032\", \"4f1033033\")","[\"4f1033033\", \"4f1033034\")","[\"4f1033100\", \"4f1033101\")","[\"4f1033101\", \"4f1033102\")","[\"4f1033102\", \"4f1033103\")","[\"4f1033103\", \"4f1033104\")","[\"4f1033110\", \"4f1033111\")","[\"4f1033111\", \"4f1033112\")","[\"4f1033112\", \"4f1033112\"]","[\"4f10331120\", \"4f10331120\"]","[\"4f103311200\", \"4f103311201\")","[\"4f1033113\", \"4f1033114\")","[\"4f1033120\", \"4f1033120\"]","[\"4f10331200\", \"4f10331200\"]","[\"4f103312000\", \"4f103312000\"]","[\"4f1033120000\", \"4f1033120001\")","[\"4f1033131\", \"4f1033132\")","[\"4f1033132\", \"4f1033133\")"]},"keysExamined":1,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":5,"advanced":0,"needTime":4,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":4,"advanced":0,"needTime":4,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1211122\", \"2f1211122\"]","[\"2f12111222\", \"2f12111223\")","[\"2f12112\", \"2f12113\")","[\"2f12121\", \"2f12122\")","[\"4f1030122\", \"4f1030122\"]","[\"4f10301222\", \"4f10301223\")","[\"4f10302\", \"4f10303\")","[\"4f10312\", \"4f10313\")","[\"4f10313\", \"4f10314\")","[\"4f10320\", \"4f10321\")","[\"4f10321\", \"4f10322\")","[\"4f10322\", \"4f10323\")","[\"4f10323\", \"4f10324\")","[\"4f10330\", \"4f10331\")","[\"4f10331\", \"4f10332\")","[\"4f10332\", \"4f10333\")","[\"4f10333\", \"4f10334\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":5,"advanced":0,"needTime":4,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":4,"advanced":0,"needTime":4,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1122\", \"2f1123\")","[\"2f1211\", \"2f1212\")","[\"2f1212\", \"2f1213\")","[\"2f1221\", \"2f1222\")","[\"4f1001\", \"4f1002\")","[\"4f1002\", \"4f1003\")","[\"4f1020\", \"4f1021\")","[\"4f102322\", \"4f102323\")","[\"4f1030\", \"4f1031\")","[\"4f1031\", \"4f1032\")","[\"4f1032\", \"4f1033\")","[\"4f1033\", \"4f1034\")","[\"4f1100\", \"4f1101\")","[\"4f1101\", \"4f1102\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1122\", \"2f1123\")","[\"2f1210\", \"2f1211\")","[\"2f1211\", \"2f1212\")","[\"2f1212\", \"2f1213\")","[\"2f1213\", \"2f1214\")","[\"2f1220333\", \"2f1220333\"]","[\"2f12203333\", \"2f12203334\")","[\"2f1221\", \"2f1222\")","[\"4f1000\", \"4f1001\")","[\"4f1001\", \"4f1002\")","[\"4f1002\", \"4f1003\")","[\"4f10031\", \"4f10032\")","[\"4f10133\", \"4f10134\")","[\"4f1020\", \"4f1021\")","[\"4f1023\", \"4f1024\")","[\"4f1030\", \"4f1031\")","[\"4f103111\", \"4f103112\")","[\"4f1100\", \"4f1101\")","[\"4f1101\", \"4f1102\")"]},"keysExamined":1,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}}]},"allPlansExecution":[]},"serverInfo":{"host":"siyuan-mbp","port":27017,"version":"3.1.0-pre-","gitVersion":"ed108dccf043a13e1eed08dafc6c9eb793094b34"},"ok":1}
+       {"queryPlanner":{"plannerVersion":1,"namespace":"test.geogeo","indexFilterSet":false,"parsedQuery":{"loc":{"$nearSphere":{"$geometry":{"type":"Point","coordinates":[-73.98784,40.75747]},"$maxDistance":1000000}}},"winningPlan":{"stage":"GEO_NEAR_2DSPHERE","keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","inputStages":[{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320102\", \"4f10320102\"]","[\"4f103201020\", \"4f103201020\"]","[\"4f1032010202\", \"4f1032010203\")","[\"4f103201021\", \"4f103201021\"]","[\"4f1032010213\", \"4f1032010213\"]","[\"4f10320102133\", \"4f10320102134\")","[\"4f103201022\", \"4f103201023\")","[\"4f103201023\", \"4f103201024\")","[\"4f10320103\", \"4f10320103\"]","[\"4f103201030\", \"4f103201030\"]","[\"4f1032010300\", \"4f1032010301\")","[\"4f1032011\", \"4f1032011\"]","[\"4f10320110\", \"4f10320110\"]","[\"4f103201101\", \"4f103201101\"]","[\"4f1032011011\", \"4f1032011011\"]","[\"4f10320110111\", \"4f10320110112\")","[\"4f10320113\", \"4f10320113\"]","[\"4f103201132\", \"4f103201133\")","[\"4f103201133\", \"4f103201134\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320100\", \"4f10320100\"]","[\"4f103201002\", \"4f103201003\")","[\"4f10320101\", \"4f10320102\")","[\"4f10320102\", \"4f10320103\")","[\"4f10320103\", \"4f10320104\")","[\"4f1032011\", \"4f1032012\")","[\"4f1032012\", \"4f1032012\"]","[\"4f10320120\", \"4f10320121\")","[\"4f1032013\", \"4f1032013\"]","[\"4f10320131\", \"4f10320132\")","[\"4f10320132\", \"4f10320132\"]","[\"4f103201321\", \"4f103201322\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032002\", \"4f1032003\")","[\"4f1032003\", \"4f1032004\")","[\"4f1032010\", \"4f1032011\")","[\"4f1032011\", \"4f1032012\")","[\"4f1032012\", \"4f1032013\")","[\"4f1032013\", \"4f1032014\")","[\"4f1032020\", \"4f1032021\")","[\"4f1032021\", \"4f1032021\"]","[\"4f10320210\", \"4f10320211\")","[\"4f1032321\", \"4f1032321\"]","[\"4f10323212\", \"4f10323213\")","[\"4f1032322\", \"4f1032323\")","[\"4f1033033\", \"4f1033033\"]","[\"4f10330333\", \"4f10330334\")","[\"4f1033100\", \"4f1033101\")","[\"4f1033103\", \"4f1033104\")","[\"4f1033110\", \"4f1033110\"]","[\"4f10331100\", \"4f10331100\"]","[\"4f103311000\", \"4f103311001\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032000\", \"4f1032001\")","[\"4f1032001\", \"4f1032002\")","[\"4f1032002\", \"4f1032003\")","[\"4f1032003\", \"4f1032004\")","[\"4f1032012\", \"4f1032013\")","[\"4f1032013\", \"4f1032013\"]","[\"4f10320133\", \"4f10320133\"]","[\"4f103201333\", \"4f103201333\"]","[\"4f1032013333\", \"4f1032013333\"]","[\"4f10320133333\", \"4f10320133334\")","[\"4f1032020\", \"4f1032021\")","[\"4f1032021\", \"4f1032022\")","[\"4f1032022\", \"4f1032023\")","[\"4f1032023\", \"4f1032024\")","[\"4f1032030\", \"4f1032031\")","[\"4f1032031\", \"4f1032032\")","[\"4f1032032\", \"4f1032033\")","[\"4f1032033\", \"4f1032033\"]","[\"4f10320331\", \"4f10320332\")","[\"4f1032311\", \"4f1032312\")","[\"4f1032312\", \"4f1032313\")","[\"4f1032313\", \"4f1032314\")","[\"4f1032320\", \"4f1032321\")","[\"4f1032321\", \"4f1032322\")","[\"4f1032322\", \"4f1032323\")","[\"4f1032323\", \"4f1032324\")","[\"4f1033020\", \"4f1033020\"]","[\"4f10330201\", \"4f10330201\"]","[\"4f103302011\", \"4f103302011\"]","[\"4f1033020111\", \"4f1033020112\")","[\"4f1033023\", \"4f1033024\")","[\"4f1033030\", \"4f1033031\")","[\"4f1033031\", \"4f1033032\")","[\"4f1033032\", \"4f1033033\")","[\"4f1033033\", \"4f1033034\")","[\"4f1033100\", \"4f1033101\")","[\"4f1033101\", \"4f1033102\")","[\"4f1033102\", \"4f1033103\")","[\"4f1033103\", \"4f1033104\")","[\"4f1033110\", \"4f1033111\")","[\"4f1033111\", \"4f1033112\")","[\"4f1033112\", \"4f1033112\"]","[\"4f10331120\", \"4f10331120\"]","[\"4f103311200\", \"4f103311201\")","[\"4f1033113\", \"4f1033114\")","[\"4f1033120\", \"4f1033120\"]","[\"4f10331200\", \"4f10331200\"]","[\"4f103312000\", \"4f103312000\"]","[\"4f1033120000\", \"4f1033120001\")","[\"4f1033131\", \"4f1033132\")","[\"4f1033132\", \"4f1033133\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1211122\", \"2f1211122\"]","[\"2f12111222\", \"2f12111223\")","[\"2f12112\", \"2f12113\")","[\"2f12121\", \"2f12122\")","[\"4f1030122\", \"4f1030122\"]","[\"4f10301222\", \"4f10301223\")","[\"4f10302\", \"4f10303\")","[\"4f10312\", \"4f10313\")","[\"4f10313\", \"4f10314\")","[\"4f10320\", \"4f10321\")","[\"4f10321\", \"4f10322\")","[\"4f10322\", \"4f10323\")","[\"4f10323\", \"4f10324\")","[\"4f10330\", \"4f10331\")","[\"4f10331\", \"4f10332\")","[\"4f10332\", \"4f10333\")","[\"4f10333\", \"4f10334\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1122\", \"2f1123\")","[\"2f1211\", \"2f1212\")","[\"2f1212\", \"2f1213\")","[\"2f1221\", \"2f1222\")","[\"4f1001\", \"4f1002\")","[\"4f1002\", \"4f1003\")","[\"4f1020\", \"4f1021\")","[\"4f102322\", \"4f102323\")","[\"4f1030\", \"4f1031\")","[\"4f1031\", \"4f1032\")","[\"4f1032\", \"4f1033\")","[\"4f1033\", \"4f1034\")","[\"4f1100\", \"4f1101\")","[\"4f1101\", \"4f1102\")"]}}},{"stage":"FETCH","inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1122\", \"2f1123\")","[\"2f1210\", \"2f1211\")","[\"2f1211\", \"2f1212\")","[\"2f1212\", \"2f1213\")","[\"2f1213\", \"2f1214\")","[\"2f1220333\", \"2f1220333\"]","[\"2f12203333\", \"2f12203334\")","[\"2f1221\", \"2f1222\")","[\"4f1000\", \"4f1001\")","[\"4f1001\", \"4f1002\")","[\"4f1002\", \"4f1003\")","[\"4f10031\", \"4f10032\")","[\"4f10133\", \"4f10134\")","[\"4f1020\", \"4f1021\")","[\"4f1023\", \"4f1024\")","[\"4f1030\", \"4f1031\")","[\"4f103111\", \"4f103112\")","[\"4f1100\", \"4f1101\")","[\"4f1101\", \"4f1102\")"]}}}]},"rejectedPlans":[]},"executionStats":{"executionSuccess":true,"nReturned":4,"executionTimeMillis":3,"totalKeysExamined":22,"totalDocsExamined":4,"executionStages":{"stage":"GEO_NEAR_2DSPHERE","nReturned":4,"executionTimeMillisEstimate":0,"works":44,"advanced":4,"needTime":39,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","searchIntervals":[{"minDistance":0,"maxDistance":13633.317181384604,"maxInclusive":false},{"minDistance":13633.317181384604,"maxDistance":40899.95154415381,"maxInclusive":false},{"minDistance":40899.95154415381,"maxDistance":95433.22026969222,"maxInclusive":false},{"minDistance":95433.22026969222,"maxDistance":204499.75772076903,"maxInclusive":false},{"minDistance":204499.75772076903,"maxDistance":422632.8326229227,"maxInclusive":false},{"minDistance":422632.8326229227,"maxDistance":858898.9824272301,"maxInclusive":false},{"minDistance":858898.9824272301,"maxDistance":1000000,"maxInclusive":true}],"inputStages":[{"stage":"FETCH","nReturned":2,"executionTimeMillisEstimate":0,"works":5,"advanced":2,"needTime":2,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":2,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":2,"executionTimeMillisEstimate":0,"works":4,"advanced":2,"needTime":2,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320102\", \"4f10320102\"]","[\"4f103201020\", \"4f103201020\"]","[\"4f1032010202\", \"4f1032010203\")","[\"4f103201021\", \"4f103201021\"]","[\"4f1032010213\", \"4f1032010213\"]","[\"4f10320102133\", \"4f10320102134\")","[\"4f103201022\", \"4f103201023\")","[\"4f103201023\", \"4f103201024\")","[\"4f10320103\", \"4f10320103\"]","[\"4f103201030\", \"4f103201030\"]","[\"4f1032010300\", \"4f1032010301\")","[\"4f1032011\", \"4f1032011\"]","[\"4f10320110\", \"4f10320110\"]","[\"4f103201101\", \"4f103201101\"]","[\"4f1032011011\", \"4f1032011011\"]","[\"4f10320110111\", \"4f10320110112\")","[\"4f10320113\", \"4f10320113\"]","[\"4f103201132\", \"4f103201133\")","[\"4f103201133\", \"4f103201134\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":2}},{"stage":"FETCH","nReturned":1,"executionTimeMillisEstimate":0,"works":5,"advanced":1,"needTime":3,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":1,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":1,"executionTimeMillisEstimate":0,"works":4,"advanced":1,"needTime":3,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032010\", \"4f1032010\"]","[\"4f10320100\", \"4f10320100\"]","[\"4f103201002\", \"4f103201003\")","[\"4f10320101\", \"4f10320102\")","[\"4f10320102\", \"4f10320103\")","[\"4f10320103\", \"4f10320104\")","[\"4f1032011\", \"4f1032012\")","[\"4f1032012\", \"4f1032012\"]","[\"4f10320120\", \"4f10320121\")","[\"4f1032013\", \"4f1032013\"]","[\"4f10320131\", \"4f10320132\")","[\"4f10320132\", \"4f10320132\"]","[\"4f103201321\", \"4f103201322\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":1}},{"stage":"FETCH","nReturned":1,"executionTimeMillisEstimate":0,"works":5,"advanced":1,"needTime":3,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":1,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":1,"executionTimeMillisEstimate":0,"works":4,"advanced":1,"needTime":3,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032002\", \"4f1032003\")","[\"4f1032003\", \"4f1032004\")","[\"4f1032010\", \"4f1032011\")","[\"4f1032011\", \"4f1032012\")","[\"4f1032012\", \"4f1032013\")","[\"4f1032013\", \"4f1032014\")","[\"4f1032020\", \"4f1032021\")","[\"4f1032021\", \"4f1032021\"]","[\"4f10320210\", \"4f10320211\")","[\"4f1032321\", \"4f1032321\"]","[\"4f10323212\", \"4f10323213\")","[\"4f1032322\", \"4f1032323\")","[\"4f1033033\", \"4f1033033\"]","[\"4f10330333\", \"4f10330334\")","[\"4f1033100\", \"4f1033101\")","[\"4f1033103\", \"4f1033104\")","[\"4f1033110\", \"4f1033110\"]","[\"4f10331100\", \"4f10331100\"]","[\"4f103311000\", \"4f103311001\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":1}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"4f1032000\", \"4f1032001\")","[\"4f1032001\", \"4f1032002\")","[\"4f1032002\", \"4f1032003\")","[\"4f1032003\", \"4f1032004\")","[\"4f1032012\", \"4f1032013\")","[\"4f1032013\", \"4f1032013\"]","[\"4f10320133\", \"4f10320133\"]","[\"4f103201333\", \"4f103201333\"]","[\"4f1032013333\", \"4f1032013333\"]","[\"4f10320133333\", \"4f10320133334\")","[\"4f1032020\", \"4f1032021\")","[\"4f1032021\", \"4f1032022\")","[\"4f1032022\", \"4f1032023\")","[\"4f1032023\", \"4f1032024\")","[\"4f1032030\", \"4f1032031\")","[\"4f1032031\", \"4f1032032\")","[\"4f1032032\", \"4f1032033\")","[\"4f1032033\", \"4f1032033\"]","[\"4f10320331\", \"4f10320332\")","[\"4f1032311\", \"4f1032312\")","[\"4f1032312\", \"4f1032313\")","[\"4f1032313\", \"4f1032314\")","[\"4f1032320\", \"4f1032321\")","[\"4f1032321\", \"4f1032322\")","[\"4f1032322\", \"4f1032323\")","[\"4f1032323\", \"4f1032324\")","[\"4f1033020\", \"4f1033020\"]","[\"4f10330201\", \"4f10330201\"]","[\"4f103302011\", \"4f103302011\"]","[\"4f1033020111\", \"4f1033020112\")","[\"4f1033023\", \"4f1033024\")","[\"4f1033030\", \"4f1033031\")","[\"4f1033031\", \"4f1033032\")","[\"4f1033032\", \"4f1033033\")","[\"4f1033033\", \"4f1033034\")","[\"4f1033100\", \"4f1033101\")","[\"4f1033101\", \"4f1033102\")","[\"4f1033102\", \"4f1033103\")","[\"4f1033103\", \"4f1033104\")","[\"4f1033110\", \"4f1033111\")","[\"4f1033111\", \"4f1033112\")","[\"4f1033112\", \"4f1033112\"]","[\"4f10331120\", \"4f10331120\"]","[\"4f103311200\", \"4f103311201\")","[\"4f1033113\", \"4f1033114\")","[\"4f1033120\", \"4f1033120\"]","[\"4f10331200\", \"4f10331200\"]","[\"4f103312000\", \"4f103312000\"]","[\"4f1033120000\", \"4f1033120001\")","[\"4f1033131\", \"4f1033132\")","[\"4f1033132\", \"4f1033133\")"]},"keysExamined":1,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":5,"advanced":0,"needTime":4,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":4,"advanced":0,"needTime":4,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1211122\", \"2f1211122\"]","[\"2f12111222\", \"2f12111223\")","[\"2f12112\", \"2f12113\")","[\"2f12121\", \"2f12122\")","[\"4f1030122\", \"4f1030122\"]","[\"4f10301222\", \"4f10301223\")","[\"4f10302\", \"4f10303\")","[\"4f10312\", \"4f10313\")","[\"4f10313\", \"4f10314\")","[\"4f10320\", \"4f10321\")","[\"4f10321\", \"4f10322\")","[\"4f10322\", \"4f10323\")","[\"4f10323\", \"4f10324\")","[\"4f10330\", \"4f10331\")","[\"4f10331\", \"4f10332\")","[\"4f10332\", \"4f10333\")","[\"4f10333\", \"4f10334\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":5,"advanced":0,"needTime":4,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":4,"advanced":0,"needTime":4,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1122\", \"2f1123\")","[\"2f1211\", \"2f1212\")","[\"2f1212\", \"2f1213\")","[\"2f1221\", \"2f1222\")","[\"4f1001\", \"4f1002\")","[\"4f1002\", \"4f1003\")","[\"4f1020\", \"4f1021\")","[\"4f102322\", \"4f102323\")","[\"4f1030\", \"4f1031\")","[\"4f1031\", \"4f1032\")","[\"4f1032\", \"4f1033\")","[\"4f1033\", \"4f1034\")","[\"4f1100\", \"4f1101\")","[\"4f1101\", \"4f1102\")"]},"keysExamined":4,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}},{"stage":"FETCH","nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"docsExamined":0,"alreadyHasObj":0,"inputStage":{"stage":"IXSCAN","filter":{"TwoDSphereKeyInRegionExpression":true},"nReturned":0,"executionTimeMillisEstimate":0,"works":1,"advanced":0,"needTime":0,"needYield":0,"saveState":0,"restoreState":0,"isEOF":1,"invalidates":0,"keyPattern":{"loc":"2dsphere"},"indexName":"loc_2dsphere","isMultiKey":false,"indexVersion":1,"direction":"forward","indexBounds":{"loc":["[\"2f1122\", \"2f1123\")","[\"2f1210\", \"2f1211\")","[\"2f1211\", \"2f1212\")","[\"2f1212\", \"2f1213\")","[\"2f1213\", \"2f1214\")","[\"2f1220333\", \"2f1220333\"]","[\"2f12203333\", \"2f12203334\")","[\"2f1221\", \"2f1222\")","[\"4f1000\", \"4f1001\")","[\"4f1001\", \"4f1002\")","[\"4f1002\", \"4f1003\")","[\"4f10031\", \"4f10032\")","[\"4f10133\", \"4f10134\")","[\"4f1020\", \"4f1021\")","[\"4f1023\", \"4f1024\")","[\"4f1030\", \"4f1031\")","[\"4f103111\", \"4f103112\")","[\"4f1100\", \"4f1101\")","[\"4f1101\", \"4f1102\")"]},"keysExamined":1,"dupsTested":0,"dupsDropped":0,"seenInvalidated":0,"matchTested":0}}]},"allPlansExecution":[]},"serverInfo":{"host":"siyuan-mbp","port":27017,"version":"3.1.0-pre-","gitVersion":"ed108dccf043a13e1eed08dafc6c9eb793094b34"},"ok":1} 
       </textarea>
       <button id="show_button" type="submit" class="btn btn-primary">Show<span class="glyphicon glyphicon-map-marker"/></button>
       <button id="prev_button" type="submit" class="btn btn-primary">Prev Stage</button>
